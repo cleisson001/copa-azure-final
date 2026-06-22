@@ -687,7 +687,7 @@ Apaga os 2 Web Apps + o plano + o Azure SQL (+ o DMS, se você tiver criado). **
 
 > 🎯 **O passo final de produção.** Até aqui, front, API e banco têm **endpoints públicos** (com firewall, mas expostos). Agora você **fecha a porta**: só o **frontend** continua na internet; **API e banco** passam a viver **dentro da VNet**, alcançáveis só por **IP privado**. E o melhor — **sem tocar em uma linha de código da aplicação**.
 
-> 🧩 **Quando fazer:** depois de validar o app 100% em PaaS (Fases 6-7). Adiciona ~$15/mês enquanto no ar (2 Private Endpoints + DNS) — **sem** plano extra, já que a API pode ficar no **mesmo plano** do front. Se optar por separar o plano da API (8.4, opcional), some ~$13/mês do B1. Provisiona, demonstra e derruba (Fase 7.2).
+> 🧩 **Quando fazer:** depois de validar o app 100% em PaaS (Fases 6-7). Adiciona ~$15/mês enquanto no ar (2 Private Endpoints + DNS) — **sem** plano extra (front e API no **mesmo plano**, compartilhando a VNet Integration). Provisiona, demonstra e derruba (Fase 7.2).
 
 #### 8.1 O conceito-chave: inbound × outbound
 
@@ -724,9 +724,7 @@ Tudo na VNet que você já tem (`vnet-prd-inf-cin-001`, `10.20.0.0/16`):
 | Recurso | Nome | Faixa / Observação |
 |---|---|---|
 | Subnet de Private Endpoints | `snet-prd-inf-pe-cin-001` | `10.20.5.0/24` · PE network policies **Disabled** |
-| Subnet integração — Front | `snet-prd-inf-appf-cin-001` | `10.20.4.0/24` · delegada `Microsoft.Web/serverFarms` |
-| Subnet integração — API | `snet-prd-inf-appsvc-cin-001` | `10.20.3.0/24` · **reusa** a da Fase 3.4 (delegada) |
-| Plano da API *(opcional)* | `asp-prd-tk-bend-cin-001` | só se quiser escalar a API separada do front (8.4) — **não** é requisito do PE |
+| Subnet de integração (App Service) | `snet-prd-inf-appsvc-cin-001` | `10.20.3.0/24` · delegada `Microsoft.Web/serverFarms` · **a mesma da Fase 3.4** — front e API (mesmo plano) compartilham |
 | Private Endpoint — API | `pe-prd-tk-bend-cin-001` | IP privado da API |
 | Private Endpoint — SQL | `pe-prd-tk-sql-cin-001` | IP privado do SQL |
 | Private DNS Zones | `privatelink.azurewebsites.net` · `privatelink.database.windows.net` | ligadas à VNet (Portal cria/associa) |
@@ -735,58 +733,49 @@ Tudo na VNet que você já tem (`vnet-prd-inf-cin-001`, `10.20.0.0/16`):
 
 > ⚠️ **A validação é de DENTRO da VNet.** Do seu PC (fora da VNet), o FQDN privado **resolve o IP público** → 403/timeout. Por isso valide sempre **de dentro**: pelo **próprio app** (`/api/health`, `/api/health/db` — o app resolve o nome privado de dentro) ou de uma **VM/Bastion na VNet**. Testar o DNS privado do seu micro **não funciona** e não significa que está errado.
 
-#### 8.3 Preparar a rede (subnets)
+#### 8.3 Preparar a rede (subnet de Private Endpoints)
+
+Só falta a subnet dos **Private Endpoints** — a de **integração já existe** (`snet-prd-inf-appsvc`, criada na Fase 3.4) e **é reutilizada** (front e API estão no **mesmo plano** e compartilham essa integração).
 
 Portal → `vnet-prd-inf-cin-001` → **Subnets** → **+ Subnet**:
-1. **`snet-prd-inf-pe-cin-001`** · `10.20.5.0/24` · **Network policies for private endpoints: Disabled** · sem delegação.
-2. **`snet-prd-inf-appf-cin-001`** · `10.20.4.0/24` · **Delegation: Microsoft.Web/serverFarms**.
-3. A **API** reusa a `snet-prd-inf-appsvc-cin-001` (`10.20.3.0/24`) criada na Fase 3.4 (se removeu, recrie delegada).
+- **`snet-prd-inf-pe-cin-001`** · `10.20.5.0/24` · **Network policies for private endpoints: Disabled** · **sem** delegação.
 
-> 💡 A subnet de integração **não pode ser a mesma** dos Private Endpoints. Com front e API **no mesmo plano** (padrão), eles **compartilham uma** integração — basta a subnet `snet-prd-inf-appsvc` (a `snet-prd-inf-appf` só é necessária **se** você separar a API em outro plano, 8.4 opcional). Os Private Endpoints ficam na **sua** subnet de PE. Subnets de integração exigem no mínimo **/28** (rec. /26) — nossas `/24` sobram.
+> 💡 A subnet de **integração** não pode ser a mesma dos **Private Endpoints** — por isso esta subnet de PE separada. **Não** é preciso criar outra subnet de integração: como front e API estão no mesmo plano, eles **compartilham** a integração existente da Fase 3.4.
 
-#### 8.4 (Opcional) Separar a API em plano próprio — só para escala/isolamento
-
-> ✅ **Não é requisito para a rede privada.** A doc oficial confirma que a VNet Integration **alcança Private Endpoints** e que **"multiple apps in the same App Service plan can use the same virtual network integration"** — **não há** restrição de "um app não alcança o PE de outro app no mesmo plano" ([Microsoft Learn — VNet integration](https://learn.microsoft.com/en-us/azure/app-service/overview-vnet-integration)). Com **1 plano** o front alcança o PE da API normalmente (validado em campo). Faça este passo **só se** quiser escalar/isolar a API independentemente do front — e aí soma o custo de um plano extra.
-
-1. Portal → **App Service plans** → **+ Create** → `asp-prd-tk-bend-cin-001` · Windows · Central India · **B1**.
-2. `app-prd-tk-bend-cin-001` → **Settings → App Service plan → Change App Service plan** → selecione `asp-prd-tk-bend-cin-001` (reinicia, sem perder config).
-
-> 💡 O tier **B1/Basic** já suporta Private Endpoint — não precisa subir de tier **nem** ter plano separado.
-
-#### 8.5 Private Endpoint do Azure SQL (público ainda ligado)
+#### 8.4 Private Endpoint do Azure SQL (público ainda ligado)
 
 1. `sql-prd-tk-cin-001` → **Security → Networking → Private access** → **+ Create a private endpoint**.
 2. **Name:** `pe-prd-tk-sql-cin-001` · sub-resource **sqlServer** · VNet `vnet-prd-inf-cin-001` · Subnet `snet-prd-inf-pe-cin-001`.
 3. **Private DNS integration: Yes** → zona `privatelink.database.windows.net` (Portal cria e **liga à VNet**).
 
-> ⏸️ **Não desligue o público do SQL ainda** — a API precisa de VNet Integration (8.6) para alcançar o IP privado primeiro. Desligar agora cortaria o app.
+> ⏸️ **Não desligue o público do SQL ainda** — valide primeiro que a API alcança o IP privado (8.5). A API **já tem VNet Integration + Route All desde a Fase 3.4**, então não há o que adicionar.
 
-#### 8.6 VNet Integration da API → SQL privado (e desligar o público do SQL)
+#### 8.5 Validar o SQL privado e desligar o público
 
-1. `app-prd-tk-bend-cin-001` → **Networking → Outbound → VNet integration → Add** → `snet-prd-inf-appsvc-cin-001` · garanta **Route All** (`WEBSITE_VNET_ROUTE_ALL=1`).
-2. **Valide a resolução privada ANTES de desligar o público** — no **Kudu** do backend (`https://app-prd-tk-bend-cin-001.scm.azurewebsites.net/DebugConsole`), use as ferramentas internas do App Service:
-   - **DNS:** `nameresolver sql-prd-tk-cin-001.database.windows.net` → deve resolver para **IP privado (`10.x`)** (e/ou o CNAME `...privatelink.database.windows.net`). **IP público** = falta **Route All** ou a **zona DNS privada linkada à VNet**.
-   - **Porta:** `tcpping sql-prd-tk-cin-001.database.windows.net:1433` → deve **conectar** (alcança o SQL pela 1433).
-   - **App:** `Invoke-RestMethod "$BEND/api/health/db"` → **connected** (agora via IP privado).
-   > ⚠️ **Não use `ping`** no App Service — o sandbox **bloqueia ICMP** (o erro "Unable to contact IP driver. General failure." é esperado, não é falha de rede). Use `nameresolver` (DNS) e `tcpping` (porta).
-3. **Agora sim:** `sql-prd-tk-cin-001` → **Networking → Public access → Disable** → **Save**.
-4. **Revalide** `/api/health/db` → continua connected. 🎉 Banco privado.
+> A API **já está integrada à VNet (com Route All) desde a Fase 3.4** (integração permanente) — **nada a adicionar aqui**, só validar e trancar.
+
+1. **Valide a resolução privada ANTES de desligar o público** — no **Kudu da API** (`https://app-prd-tk-bend-cin-001.scm.azurewebsites.net/DebugConsole`):
+   - **DNS:** `nameresolver sql-prd-tk-cin-001.database.windows.net` → deve resolver para **IP privado (`10.x`)** (CNAME `...privatelink.database.windows.net`). **IP público** = falta **Route All** (3.4) ou a **zona DNS linkada à VNet**.
+   - **Porta:** `tcpping sql-prd-tk-cin-001.database.windows.net:1433` → deve **conectar**.
+   - **App:** `Invoke-RestMethod "$BEND/api/health/db"` → **connected** (via IP privado).
+   > ⚠️ **Não use `ping`** no App Service — o sandbox **bloqueia ICMP** ("Unable to contact IP driver. General failure." é esperado). Use `nameresolver` e `tcpping`.
+2. **Agora sim:** `sql-prd-tk-cin-001` → **Networking → Public access → Disable** → **Save**.
+3. **Revalide** `/api/health/db` → continua connected. 🎉 Banco privado.
 
 > 💡 O **host no `DefaultConnection`** **não mudou** — o mesmo FQDN agora resolve privado (VNet integ. + Route All + zona DNS linkada).
 
-#### 8.7 Private Endpoint da API (público ainda ligado)
+#### 8.6 Private Endpoint da API (público ainda ligado)
 
 1. `app-prd-tk-bend-cin-001` → **Networking → Inbound → Private endpoints → + Add** → `pe-prd-tk-bend-cin-001` · sub-resource **sites** · VNet `vnet-prd-inf-cin-001` · Subnet `snet-prd-inf-pe-cin-001`.
-2. **Private DNS integration: Yes** → zona `privatelink.azurewebsites.net`. O **Private DNS Zone Group** cria **automaticamente** os registros `A` do **app** *e* do **`scm`** (Kudu) apontando para o IP privado — por isso o **deploy/Kudu também fica privado** (ver 8.9). Continue usando o nome `*.azurewebsites.net` (o certificado é desse nome).
+2. **Private DNS integration: Yes** → zona `privatelink.azurewebsites.net`. O **Private DNS Zone Group** cria **automaticamente** os registros `A` do **app** *e* do **`scm`** (Kudu) apontando para o IP privado — por isso o **deploy/Kudu também fica privado** (ver 8.8). Continue usando o nome `*.azurewebsites.net` (o certificado é desse nome).
 
-> ⏸️ **Não desligue o público da API ainda** — o front só a alcança privado depois do 8.8.
+> ⏸️ **Não desligue o público da API ainda** — o front só a alcança privado depois do 8.7.
 
-#### 8.8 VNet Integration do Front → validar → desligar o público da API
+#### 8.7 Validar o caminho front → API privada e desligar o público
 
-1. **Garanta a VNet Integration do front.** A integração é **por plano**:
-   - **Front no mesmo plano da API** (padrão): ele **já está integrado** (a integração do 8.6 vale para o plano todo) — só confirme em **Networking → VNet integration** + **Route All** ligado.
-   - **Front em outro plano** (se você fez a 8.4 opcional): `app-prd-tk-fend-cin-001` → **Networking → Outbound → VNet integration → Add** → `snet-prd-inf-appf-cin-001` · **Route All** ligado.
-2. **Valide do Kudu do FRONT** (`https://app-prd-tk-fend-cin-001.scm.azurewebsites.net/DebugConsole`), com o **público da API ainda ligado**:
+> O front está **no mesmo plano** da API, então **já usa a mesma VNet Integration** (do plano, da Fase 3.4) — **nada a adicionar**. Só confirme o **Route All** em `app-prd-tk-fend-cin-001` → **Networking → VNet integration**.
+
+1. **Valide do Kudu do FRONT** (`https://app-prd-tk-fend-cin-001.scm.azurewebsites.net/DebugConsole`), com o **público da API ainda ligado**:
    - **DNS:** `nameresolver app-prd-tk-bend-cin-001.azurewebsites.net` → deve resolver **IP privado (`10.x`)** (CNAME `...privatelink.azurewebsites.net`).
    - **Porta:** `tcpping app-prd-tk-bend-cin-001.azurewebsites.net:443` → deve **conectar**.
    - **Ponta a ponta:** `Invoke-RestMethod "$APP/api/health"` → **ok** (o front proxiou para a API pelo IP privado; o `web.config` **não mudou**).
@@ -794,7 +783,7 @@ Portal → `vnet-prd-inf-cin-001` → **Subnets** → **+ Subnet**:
 4. **Confirme o bloqueio:** a URL da API **direto** da internet deve dar **403/timeout**; pelo **front** continua **200**.
 5. 🔁 **Teste de estabilidade — reinicie os DOIS apps.** Portal → **Restart** no `app-prd-tk-fend-cin-001` **e** no `app-prd-tk-bend-cin-001`. Aguarde **~1-2 min** (propagação da rede privada) e **revalide**: `nameresolver` + `tcpping :443` (Kudu do front) → IP privado/conecta; e o smoke do app (`/api/health`, `/api/health/db`, login). _Isso prova que funciona "a frio" — a falha transitória que aparece **durante** a configuração some depois que o restart estabiliza._
 
-#### 8.9 Validação + considerações operacionais
+#### 8.8 Validação + considerações operacionais
 
 Smoke final (do seu PC): o app funciona pelo **front público**; a **API e o SQL não respondem pela internet** (403/timeout). 🔒
 
@@ -826,8 +815,8 @@ Ao privatizar, duas tarefas mudam — e isso é **esperado**:
 | **DMS** — `Next` indisponível ao selecionar tabelas (Fase 5) | Destino vazio e **"Migrate Missing schema"** não marcado | Marque **Migrate Missing schema** (5.4) — sem tabelas no destino, o DMS exige a migração de schema para prosseguir |
 | Domínio customizado **não valida** | Registro `asuid` TXT/CNAME não propagou | `Resolve-DnsName asuid.www.<domínio> -Type TXT -Server 8.8.8.8`; aguarde a propagação e revalide |
 | **Cadastro/login falham só no navegador** ("não foi possível criar a conta" / 500), mas **`curl` funciona** | **CORS:** `FRONTEND_URL` não bate com o `Origin` do navegador — quase sempre **barra `/` no fim** ou o domínio faltando | Ajuste `FRONTEND_URL` para `https://seu-dominio` **sem `/`** (4.6); `curl` engana porque não manda `Origin` |
-| **(Fase 8)** `/api/*` dá **502/timeout** após desligar o público da API | Front sem **Route All**, ou zona `privatelink.azurewebsites.net` não linkada | Confirme VNet Integration do front + `WEBSITE_VNET_ROUTE_ALL=1` + zona linkada à VNet (8.8) |
-| **(Fase 8)** `/api/health/db` dá **ETIMEOUT** após desligar o público do SQL | API sem VNet Integration/Route All, ou zona `privatelink.database.windows.net` não linkada | Reveja a Fase 8.6 (integração + Route All + zona DNS) |
+| **(Fase 8)** `/api/*` dá **502/timeout** após desligar o público da API | Front sem **Route All**, ou zona `privatelink.azurewebsites.net` não linkada | Confirme VNet Integration do front + `WEBSITE_VNET_ROUTE_ALL=1` + zona linkada à VNet (8.7) |
+| **(Fase 8)** `/api/health/db` dá **ETIMEOUT** após desligar o público do SQL | API sem VNet Integration/Route All, ou zona `privatelink.database.windows.net` não linkada | Reveja a **Fase 3.4** (integração/Route All da API) + a zona DNS do PE (8.4); valide pela 8.5 |
 | **(Fase 8)** front **não alcança** o PE da API | **Route All** desligado no front, ou zona `privatelink.azurewebsites.net` não linkada à VNet | Ligue **Route All** no front; confirme a Private DNS Zone linkada; valide com `nameresolver` (deve dar IP privado) + `tcpping <api>:443`. _(Estar no mesmo plano que o front **não** impede — não há essa limitação.)_ |
 | **(Fase 8)** PE criado mas o nome resolve **IP público** | Consulta feita **de fora** da VNet, ou zona DNS não linkada | Private DNS resolve **de dentro** da VNet; teste via `/api/health` do app, não do seu PC |
 | **(Fase 8)** Private Endpoint **não cria** na subnet | Network policies de PE habilitadas | `snet-prd-inf-pe-cin-001` → desabilite *network policies for private endpoints* (8.3) |
